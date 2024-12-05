@@ -12,8 +12,8 @@ interface ILido {
 contract StakedEthOptions is Ownable, ReentrancyGuard {
     address public immutable lido;
     uint256 public immutable strikePrice;
-    uint256 public immutable premium;
-    uint256 public immutable expiration;
+    uint256 public premium;
+    uint256 public expiration;
     uint256 public stakedShares;
     address public buyer;
     bool public isExercised;
@@ -43,18 +43,18 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
     function stakeETH() external payable onlyOwner nonReentrant {
         require(msg.value > 0, "Must stake some ETH");
 
-        // Write stakedShares only once
         stakedShares = ILido(lido).submit{value: msg.value}(address(0));
         emit Staked(msg.sender, msg.value);
     }
 
     function buyOption() external payable nonReentrant {
+        require(msg.sender == tx.origin, "Contracts cannot buy options"); // Restrict to EOAs
         require(msg.value == premium, "Incorrect premium amount");
         require(buyer == address(0), "Option already sold");
 
-        // Combine buyer assignment and transfer in one step
         buyer = msg.sender;
-        payable(owner()).transfer(msg.value);
+        (bool success, ) = payable(owner()).call{value: msg.value}("");
+        require(success, "Transfer to owner failed");
 
         emit OptionBought(buyer, msg.value);
     }
@@ -65,10 +65,10 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         require(block.timestamp <= expiration, "Option expired");
         require(currentPrice >= strikePrice, "Current price below strike price");
 
-        // Combine state update and transfer
         uint256 stETHAmount = ILido(lido).getPooledEthByShares(stakedShares);
         isExercised = true; // Update the state before external call
-        payable(buyer).transfer(stETHAmount);
+        (bool success, ) = payable(buyer).call{value: stETHAmount}("");
+        require(success, "Transfer to buyer failed");
 
         emit OptionExercised(buyer, stETHAmount);
     }
@@ -77,10 +77,15 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         require(!isExercised, "Option already exercised");
         require(block.timestamp > expiration, "Option not yet expired");
 
-        // Combine retrieval and transfer logic
         uint256 stETHAmount = ILido(lido).getPooledEthByShares(stakedShares);
-        payable(owner()).transfer(stETHAmount);
+        (bool success, ) = payable(owner()).call{value: stETHAmount}("");
+        require(success, "Transfer to owner failed");
 
         emit OptionCancelled(owner(), stETHAmount);
+    }
+
+    receive() external payable {}
+    fallback() external payable {
+        revert("Function not supported");
     }
 }
