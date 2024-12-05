@@ -12,8 +12,8 @@ interface ILido {
 contract StakedEthOptions is Ownable, ReentrancyGuard {
     address public immutable lido;
     uint256 public immutable strikePrice;
-    uint256 public premium;
-    uint256 public expiration;
+    uint256 public immutable premium;
+    uint256 public immutable expiration;
     uint256 public stakedShares;
     address public buyer;
     bool public isExercised;
