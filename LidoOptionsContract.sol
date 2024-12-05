@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
 interface ILido {
     function submit(address _referral) external payable returns (uint256);
     function sharesOf(address _account) external view returns (uint256);
     function getPooledEthByShares(uint256 _shares) external view returns (uint256);
 }
 
-contract StakedEthOptions {
+contract StakedEthOptions is Ownable, ReentrancyGuard {
     address public staker; // The address of the staker
     address public buyer; // The address of the option buyer
     address public lido; // Lido staking contract
@@ -28,11 +31,11 @@ contract StakedEthOptions {
         strikePrice = _strikePrice;
         premium = _premium;
         expiration = block.timestamp + _expiration;
+        transferOwnership(msg.sender); // Set the contract deployer as the owner
     }
 
     // Stake ETH and mint stETH
-    function stakeETH() external payable {
-        require(msg.sender == staker, "Only the staker can stake ETH");
+    function stakeETH() external payable onlyOwner nonReentrant {
         require(msg.value > 0, "Must stake some ETH");
 
         // Stake ETH with Lido and get stETH shares
@@ -40,7 +43,7 @@ contract StakedEthOptions {
     }
 
     // Allow a buyer to purchase the option
-    function buyOption() external payable {
+    function buyOption() external payable nonReentrant {
         require(msg.value == premium, "Incorrect premium amount");
         require(buyer == address(0), "Option already sold");
 
@@ -51,7 +54,7 @@ contract StakedEthOptions {
     }
 
     // Exercise the option
-    function exercise(uint256 currentPrice) external {
+    function exercise(uint256 currentPrice) external nonReentrant {
         require(msg.sender == buyer, "Only the option buyer can exercise");
         require(!isExercised, "Option already exercised");
         require(block.timestamp <= expiration, "Option expired");
@@ -64,8 +67,7 @@ contract StakedEthOptions {
     }
 
     // Cancel the option if it expires unexercised
-    function cancelOption() external {
-        require(msg.sender == staker, "Only the staker can cancel");
+    function cancelOption() external onlyOwner nonReentrant {
         require(!isExercised, "Option already exercised");
         require(block.timestamp > expiration, "Option not yet expired");
 
@@ -74,4 +76,3 @@ contract StakedEthOptions {
         payable(staker).transfer(stETHAmount);
     }
 }
-
