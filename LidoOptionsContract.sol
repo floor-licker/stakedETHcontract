@@ -6,19 +6,22 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 interface ILido {
     function submit(address _referral) external payable returns (uint256);
-    function sharesOf(address _account) external view returns (uint256);
     function getPooledEthByShares(uint256 _shares) external view returns (uint256);
 }
 
 contract StakedEthOptions is Ownable, ReentrancyGuard {
-    address public staker; // The address of the staker
-    address public buyer; // The address of the option buyer
-    address public lido; // Lido staking contract
-    uint256 public strikePrice; // Strike price in ETH
-    uint256 public premium; // Premium in wei
-    uint256 public expiration; // Expiration timestamp
-    uint256 public stakedShares; // Amount of stETH shares
+    address public immutable lido;
+    uint256 public immutable strikePrice;
+    uint256 public premium;
+    uint256 public expiration;
+    uint256 public stakedShares;
+    address public buyer;
     bool public isExercised;
+
+    event Staked(address indexed staker, uint256 amount);
+    event OptionBought(address indexed buyer, uint256 premium);
+    event OptionExercised(address indexed buyer, uint256 stETHAmount);
+    event OptionCancelled(address indexed staker, uint256 stETHAmount);
 
     constructor(
         address _lido,
@@ -26,53 +29,58 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         uint256 _premium,
         uint256 _expiration
     ) {
+        require(_lido != address(0), "Invalid Lido address");
+        require(_strikePrice > 0, "Strike price must be greater than zero");
+        require(_expiration > 0, "Expiration time must be positive");
+
         lido = _lido;
-        staker = msg.sender;
         strikePrice = _strikePrice;
         premium = _premium;
         expiration = block.timestamp + _expiration;
-        transferOwnership(msg.sender); // Set the contract deployer as the owner
+        transferOwnership(msg.sender);
     }
 
-    // Stake ETH and mint stETH
     function stakeETH() external payable onlyOwner nonReentrant {
         require(msg.value > 0, "Must stake some ETH");
 
-        // Stake ETH with Lido and get stETH shares
+        // Write stakedShares only once
         stakedShares = ILido(lido).submit{value: msg.value}(address(0));
+        emit Staked(msg.sender, msg.value);
     }
 
-    // Allow a buyer to purchase the option
     function buyOption() external payable nonReentrant {
         require(msg.value == premium, "Incorrect premium amount");
         require(buyer == address(0), "Option already sold");
 
+        // Combine buyer assignment and transfer in one step
         buyer = msg.sender;
+        payable(owner()).transfer(msg.value);
 
-        // Transfer the premium to the staker
-        payable(staker).transfer(premium);
+        emit OptionBought(buyer, msg.value);
     }
 
-    // Exercise the option
     function exercise(uint256 currentPrice) external nonReentrant {
         require(msg.sender == buyer, "Only the option buyer can exercise");
         require(!isExercised, "Option already exercised");
         require(block.timestamp <= expiration, "Option expired");
         require(currentPrice >= strikePrice, "Current price below strike price");
 
-        // Transfer stETH shares to the buyer
+        // Combine state update and transfer
         uint256 stETHAmount = ILido(lido).getPooledEthByShares(stakedShares);
-        isExercised = true;
+        isExercised = true; // Update the state before external call
         payable(buyer).transfer(stETHAmount);
+
+        emit OptionExercised(buyer, stETHAmount);
     }
 
-    // Cancel the option if it expires unexercised
     function cancelOption() external onlyOwner nonReentrant {
         require(!isExercised, "Option already exercised");
         require(block.timestamp > expiration, "Option not yet expired");
 
-        // Return stETH shares to the staker
+        // Combine retrieval and transfer logic
         uint256 stETHAmount = ILido(lido).getPooledEthByShares(stakedShares);
-        payable(staker).transfer(stETHAmount);
+        payable(owner()).transfer(stETHAmount);
+
+        emit OptionCancelled(owner(), stETHAmount);
     }
 }
