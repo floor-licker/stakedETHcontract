@@ -12,8 +12,8 @@ interface ILido {
 contract StakedEthOptions is Ownable, ReentrancyGuard {
     address public immutable lido;
     uint256 public immutable strikePrice;
+    uint256 public immutable expiration;
     uint256 public premium;
-    uint256 public expiration;
     uint256 public stakedShares;
     address public buyer;
     bool public isExercised;
@@ -37,12 +37,10 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         strikePrice = _strikePrice;
         premium = _premium;
         expiration = block.timestamp + _expiration;
-        transferOwnership(msg.sender);
     }
 
     function stakeETH() external payable onlyOwner nonReentrant {
         require(msg.value > 0, "Must stake some ETH");
-
         stakedShares = ILido(lido).submit{value: msg.value}(address(0));
         emit Staked(msg.sender, msg.value);
     }
@@ -82,6 +80,13 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         require(success, "Transfer to owner failed");
 
         emit OptionCancelled(owner(), stETHAmount);
+    }
+
+    function withdraw() external onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to withdraw");
+        (bool success, ) = payable(owner()).call{value: balance}("");
+        require(success, "Withdraw failed");
     }
 
     receive() external payable {}
