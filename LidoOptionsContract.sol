@@ -4,6 +4,7 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface ILido {
     function submit(address _referral) external payable returns (uint256);
@@ -24,6 +25,8 @@ interface IAggregatorV3Interface {
 }
 
 contract StakedEthOptions is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     address public immutable lido;            // stETH token contract (Lido)
     uint256 public immutable strikePrice;     // Strike price in same units as aggregator
     uint256 public immutable expiration;      // Expiration timestamp
@@ -95,9 +98,8 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         uint256 stETHBalance = IERC20(lido).balanceOf(address(this));
         require(stETHBalance > 0, "No stETH tokens to transfer");
 
-        // Transfer all stETH to the buyer
-        bool transferSuccess = IERC20(lido).transfer(buyer, stETHBalance);
-        require(transferSuccess, "Transfer to buyer failed");
+        // Transfer all stETH to the buyer using SafeERC20
+        IERC20(lido).safeTransfer(buyer, stETHBalance);
 
         emit OptionExercised(buyer, stETHBalance);
     }
@@ -109,8 +111,8 @@ contract StakedEthOptions is Ownable, ReentrancyGuard {
         uint256 stETHBalance = IERC20(lido).balanceOf(address(this));
         require(stETHBalance > 0, "No stETH to reclaim");
 
-        bool transferSuccess = IERC20(lido).transfer(owner(), stETHBalance);
-        require(transferSuccess, "Transfer to owner failed");
+        // Transfer all stETH back to the owner using SafeERC20
+        IERC20(lido).safeTransfer(owner(), stETHBalance);
 
         emit OptionCancelled(owner(), stETHBalance);
     }
