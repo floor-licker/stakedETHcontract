@@ -27,105 +27,166 @@ interface IAggregatorV3Interface {
 contract StakedEthOptions is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    address public immutable lido;            // stETH token contract (Lido)
-    uint256 public immutable strikePrice;     // Strike price in same units as aggregator
-    uint256 public immutable expiration;      // Expiration timestamp
-    uint256 public premium;                   // Premium in ETH (paid by buyer)
-    uint256 public stakedShares;              // Shares minted upon staking
-    address public buyer;                     // The buyer of the option
-    bool public isExercised;                  // Whether the option has been exercised
+    // Struct to represent an option
+    struct Option {
+        address buyer;
+        uint256 premium;
+        uint256 strikePrice;
+        uint256 expiration;
+        bool isExercised;
+    }
 
-    IAggregatorV3Interface public priceFeed;  // Trusted price feed (e.g., Chainlink)
+    // Lido stETH token contract
+    address public immutable lido;
 
+    // Price feed interface
+    IAggregatorV3Interface public priceFeed;
+
+    // Mapping from option ID to Option
+    mapping(uint256 => Option) public options;
+    uint256 public optionCount;
+
+    // Total staked shares
+    uint256 public stakedShares;
+
+    // Events
     event Staked(address indexed staker, uint256 amount);
-    event OptionBought(address indexed buyer, uint256 premium);
-    event OptionExercised(address indexed buyer, uint256 stETHAmount);
-    event OptionCancelled(address indexed staker, uint256 stETHAmount);
+    event OptionBought(address indexed buyer, uint256 premium, uint256 optionId);
+    event OptionExercised(address indexed buyer, uint256 stETHAmount, uint256 optionId);
+    event OptionCancelled(address indexed owner, uint256 stETHAmount, uint256 optionId);
+    event Withdrawn(address indexed owner, uint256 amount);
 
-    constructor(
-        address _lido,
-        uint256 _strikePrice,
-        uint256 _premium,
-        uint256 _expiration,
-        address _priceFeed
-    ) {
+    /**
+     * @dev Constructor initializes the contract with required parameters.
+     * @param _lido Address of the Lido stETH contract.
+     * @param _priceFeed Address of the trusted price feed (e.g., Chainlink).
+     */
+    constructor(address _lido, address _priceFeed) {
         require(_lido != address(0), "Invalid Lido address");
-        require(_strikePrice > 0, "Strike price must be greater than zero");
-        require(_expiration > 0, "Expiration time must be positive");
         require(_priceFeed != address(0), "Invalid price feed address");
 
         lido = _lido;
-        strikePrice = _strikePrice;
-        premium = _premium;
-        expiration = block.timestamp + _expiration;
         priceFeed = IAggregatorV3Interface(_priceFeed);
     }
 
+    /**
+     * @dev Allows the owner to stake ETH and receive stETH.
+     */
     function stakeETH() external payable onlyOwner nonReentrant {
         require(msg.value > 0, "Must stake some ETH");
-        stakedShares = ILido(lido).submit{value: msg.value}(address(0));
+        uint256 shares = ILido(lido).submit{value: msg.value}(address(0));
+        stakedShares += shares;
         emit Staked(msg.sender, msg.value);
     }
 
-    function buyOption() external payable nonReentrant {
+    /**
+     * @dev Allows a user to buy an option by paying the premium.
+     * @param _strikePrice The strike price of the option.
+     * @param _expiration The duration (in seconds) until the option expires.
+     */
+    function buyOption(uint256 _strikePrice, uint256 _expiration) external payable nonReentrant {
         require(msg.sender == tx.origin, "Contracts cannot buy options");
-        require(msg.value == premium, "Incorrect premium amount");
-        require(buyer == address(0), "Option already sold");
+        require(msg.value > 0, "Premium must be greater than zero");
+        require(_strikePrice > 0, "Strike price must be greater than zero");
+        require(_expiration > 0, "Expiration time must be positive");
 
-        buyer = msg.sender;
+        optionCount += 1;
+        options[optionCount] = Option({
+            buyer: msg.sender,
+            premium: msg.value,
+            strikePrice: _strikePrice,
+            expiration: block.timestamp + _expiration,
+            isExercised: false
+        });
+
+        // Transfer the premium to the owner
         (bool success, ) = payable(owner()).call{value: msg.value}("");
         require(success, "Transfer to owner failed");
 
-        emit OptionBought(buyer, msg.value);
+        emit OptionBought(msg.sender, msg.value, optionCount);
     }
 
-    function exercise() external nonReentrant {
-        require(msg.sender == buyer, "Only the option buyer can exercise");
-        require(!isExercised, "Option already exercised");
-        require(block.timestamp <= expiration, "Option expired");
+    /**
+     * @dev Allows the buyer to exercise their option if conditions are met.
+     * @param _optionId The ID of the option to exercise.
+     */
+    function exercise(uint256 _optionId) external nonReentrant {
+        Option storage option = options[_optionId];
+        require(msg.sender == option.buyer, "Only the option buyer can exercise");
+        require(!option.isExercised, "Option already exercised");
+        require(block.timestamp <= option.expiration, "Option expired");
 
-        // Get the trusted price from the oracle
-        (, int256 price, , , ) = priceFeed.latestRoundData();
-        require(price >= 0, "Invalid price feed response");
-        uint256 currentPrice = uint256(price);
+        uint256 currentPrice = getCurrentPrice();
+        require(currentPrice >= option.strikePrice, "Current price below strike price");
 
-        require(currentPrice >= strikePrice, "Current price below strike price");
+        option.isExercised = true;
 
-        isExercised = true;
-
-        // Determine how many stETH tokens the contract has
-        // The contract received stETH tokens from the Lido submit call
         uint256 stETHBalance = IERC20(lido).balanceOf(address(this));
         require(stETHBalance > 0, "No stETH tokens to transfer");
 
-        // Transfer all stETH to the buyer using SafeERC20
-        IERC20(lido).safeTransfer(buyer, stETHBalance);
+        // Transfer stETH to the buyer
+        IERC20(lido).safeTransfer(option.buyer, stETHBalance);
 
-        emit OptionExercised(buyer, stETHBalance);
+        emit OptionExercised(option.buyer, stETHBalance, _optionId);
     }
 
-    function cancelOption() external onlyOwner nonReentrant {
-        require(!isExercised, "Option already exercised");
-        require(block.timestamp > expiration, "Option not yet expired");
+    /**
+     * @dev Allows the owner to cancel an expired option and reclaim stETH.
+     * @param _optionId The ID of the option to cancel.
+     */
+    function cancelOption(uint256 _optionId) external onlyOwner nonReentrant {
+        Option storage option = options[_optionId];
+        require(!option.isExercised, "Option already exercised");
+        require(block.timestamp > option.expiration, "Option not yet expired");
 
         uint256 stETHBalance = IERC20(lido).balanceOf(address(this));
         require(stETHBalance > 0, "No stETH to reclaim");
 
-        // Transfer all stETH back to the owner using SafeERC20
+        // Transfer stETH back to the owner
         IERC20(lido).safeTransfer(owner(), stETHBalance);
 
-        emit OptionCancelled(owner(), stETHBalance);
+        emit OptionCancelled(owner(), stETHBalance, _optionId);
     }
 
+    /**
+     * @dev Allows the owner to withdraw any residual ETH from the contract.
+     */
     function withdraw() external onlyOwner nonReentrant {
-        // Withdraw any leftover ETH (e.g., premium if not yet transferred)
         uint256 balance = address(this).balance;
         require(balance > 0, "No ETH to withdraw");
         (bool success, ) = payable(owner()).call{value: balance}("");
         require(success, "Withdraw failed");
+        emit Withdrawn(owner(), balance);
     }
 
+    /**
+     * @dev Fetches the current ETH price from the price feed.
+     * @return The current ETH price as a uint256.
+     */
+    function getCurrentPrice() internal view returns (uint256) {
+        (
+            uint80 roundID, 
+            int256 price,
+            uint256 startedAt,
+            uint256 updatedAt,
+            uint80 answeredInRound
+        ) = priceFeed.latestRoundData();
+        
+        require(price > 0, "Invalid price from oracle");
+        require(answeredInRound >= roundID, "Stale price data");
+        require(updatedAt > 0, "Round not complete");
+
+        return uint256(price);
+    }
+
+    /**
+     * @dev Fallback function to accept ETH.
+     */
     receive() external payable {}
+
+    /**
+     * @dev Fallback function to reject unknown function calls.
+     */
     fallback() external payable {
         revert("Function not supported");
     }
